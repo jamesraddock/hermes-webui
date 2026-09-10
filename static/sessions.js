@@ -1409,15 +1409,20 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // One-shot profile-switch workspace wins first; otherwise prefer the profile default.
+    // Explicit profile switch wins, then the current conversation, then the profile default.
+    // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const inheritWs=switchWs||(S._profileDefaultWorkspace||null)||(S.session?S.session.workspace:null);
+    const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
+    const inheritWs=switchWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
     };
-    if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
+    if(S.session&&S.session.session_id){
+      reqBody.prev_session_id=S.session.session_id;
+      if(sessionWs) reqBody.workspace_inherited_from_prev_session=true;
+    }
     // Three-value worktree contract (#6022): explicit true/false is forwarded
     // verbatim; an ABSENT key lets the server apply the agent's config-level
     // `worktree:` default. Auto-bind paths pass worktree:false explicitly so a
@@ -1453,7 +1458,7 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
-      // Cold-start / picker-without-provider fallback: when the dropdown option's
+      // Cold-start / picker-without-provider fallback (#2518): when the dropdown option's
       // data-provider is empty/'default' or the persisted state predates provider
       // tracking, newModelState.model_provider is null. POST /api/session/new's
       // fast path in _resolve_compatible_session_model_state requires both model
@@ -2801,7 +2806,7 @@ function _showHandoffHint(sid, rounds) {
     </div>
     <div class="handoff-hint-actions">
       <button class="handoff-hint-action" type="button">View summary</button>
-      <button class="handoff-hint-dismiss" type="button" onclick="event.stopPropagation(); _dismissHandoffHint('${esc(sid)}')" title="Dismiss">
+      <button class="handoff-hint-dismiss" type="button" onclick="event.stopPropagation(); _dismissHandoffHint(${jsArg(sid)})" title="Dismiss">
         Close
       </button>
     </div>
@@ -7117,6 +7122,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   };
   const orphans=[];
   const renderableChildIds=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
+  const childAttachOrderById=new Map();
+  let childAttachCursor=0;
   const attachQueueById=new Map();
   for(const candidate of [...(rawSessions||[]),...(referenceSessions||[])]){
     if(candidate&&candidate.session_id&&!attachQueueById.has(candidate.session_id)) attachQueueById.set(candidate.session_id,candidate);
@@ -7171,6 +7178,9 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     }
     if(parentRow){
       const childCopy={...child};
+      if(!childAttachOrderById.has(childCopy.session_id)){
+        childAttachOrderById.set(childCopy.session_id, childAttachCursor++);
+      }
       if(parentSegment){
         childCopy._parent_segment_id=parentSegment.session_id;
         childCopy._parent_segment_title=_sessionDisplayTitle(parentSegment)||child.parent_title||'Untitled';
@@ -7197,6 +7207,23 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // branch above and still orphans as before.
       if(child&&child._cross_surface_child_session&&_isChildSession(child)) continue;
       orphans.push({...child,_orphan_child_session:true});
+    }
+  }
+  const resolveReadOnlySession = typeof _isReadOnlySession === 'function'
+    ? _isReadOnlySession
+    : ((session) => !!(session && session.read_only));
+  for(const row of rows){
+    if(Array.isArray(row._child_sessions)&&row._child_sessions.length>1){
+      row._child_sessions.sort((a,b)=>{
+        const readOnlyCmp = Number(resolveReadOnlySession(a))-Number(resolveReadOnlySession(b));
+        if(readOnlyCmp!==0) return readOnlyCmp;
+        const aOrder = childAttachOrderById.get(a&&a.session_id) ?? Number.MAX_SAFE_INTEGER;
+        const bOrder = childAttachOrderById.get(b&&b.session_id) ?? Number.MAX_SAFE_INTEGER;
+        return aOrder-bOrder;
+      });
+    }
+    if(Array.isArray(row._child_sessions)){
+      row._child_session_count=row._child_sessions.length;
     }
   }
   return [...rows,...orphans];
@@ -8316,7 +8343,7 @@ function renderSessionListFromCache(){
       const childList=document.createElement('div');
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
-      const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
+      const sortedChildren=[...s._child_sessions];
       const openChildSession=async(childSession)=>{
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
