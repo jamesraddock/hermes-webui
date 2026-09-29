@@ -664,6 +664,42 @@ def test_extension_static_serving_is_sandboxed(tmp_path, monkeypatch):
     assert dotfile.status == 404
 
 
+def test_private_metrics_feed_requires_configured_auth(tmp_path, monkeypatch):
+    root = tmp_path / "extensions"
+    root.mkdir()
+    (root / "metrics.json").write_text('{"private":"synthetic"}', encoding="utf-8")
+    (root / "pipeline-dash.js").write_text("// ordinary extension", encoding="utf-8")
+    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
+
+    from api import auth
+    from api.extensions import serve_extension_static
+
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: False)
+    for path in ("/extensions/metrics.json", "/extensions/%6detrics.json"):
+        response = FakeHandler()
+        parsed = SimpleNamespace(path=path)
+        assert auth.check_auth(response, parsed) is True
+        assert serve_extension_static(response, parsed) is True
+        assert response.status == 404
+        assert b"synthetic" not in response.body
+
+    ordinary = FakeHandler()
+    assert serve_extension_static(ordinary, SimpleNamespace(path="/extensions/pipeline-dash.js")) is True
+    assert ordinary.status == 200
+
+    # The request handler's auth check rejects anonymous callers when auth is
+    # enabled; serving the file afterward must continue to work for a logged-in user.
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "ensure_trusted_auth_session", lambda handler: None)
+    anonymous = FakeHandler()
+    assert auth.check_auth(anonymous, SimpleNamespace(path="/extensions/metrics.json", query="")) is False
+    assert anonymous.status == 302
+    protected = FakeHandler()
+    assert serve_extension_static(protected, SimpleNamespace(path="/extensions/metrics.json")) is True
+    assert protected.status == 200
+    assert bytes(protected.body) == b'{"private":"synthetic"}'
+
+
 def test_extension_static_serving_fails_closed_when_disabled_or_unreadable(tmp_path, monkeypatch):
     missing_root = tmp_path / "missing"
     monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(missing_root))

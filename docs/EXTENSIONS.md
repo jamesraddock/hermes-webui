@@ -48,6 +48,12 @@ Extensions cannot, by themselves:
 - change Hermes Agent permissions, models, memory, or tools unless they call
   existing authenticated APIs that already allow those changes
 
+Generated `/extensions/metrics.json` is a private dashboard feed, not a public
+extension asset: WebUI returns 404 for that path when authentication is not
+configured. With authentication enabled, normal session authorization applies.
+Other extension assets retain their existing behavior. Keep the feed out of
+public extension deployments, including while auth is temporarily disabled.
+
 ## Configuration
 
 ### One-click install (no configuration required)

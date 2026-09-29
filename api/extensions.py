@@ -2124,6 +2124,16 @@ def serve_extension_static(handler, parsed) -> bool:
     if not _is_safe_relative_path(rel):
         return _not_found(handler)
 
+    # This generated feed can contain private operational data. With WebUI
+    # authentication disabled, the request-level check allows every caller;
+    # refuse the feed even if the snapshot file remains on disk. Check the
+    # decoded path so URL-encoded spellings cannot bypass this guard.
+    if rel == "metrics.json":
+        from api.auth import is_auth_enabled
+
+        if not is_auth_enabled():
+            return _not_found(handler)
+
     static_file = (root / rel).resolve()
     try:
         static_file.relative_to(root)
